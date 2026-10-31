@@ -27,8 +27,7 @@ relay server 实现沉淀而来（经作者许可），协议分析见 `PROTOCOL
 `alma-relay-e2e/v1` 不同，**默认与官方 Alma 客户端不互通**——互通需要什么见
 PROTOCOL.md §7。
 
-配对凭证是一个 256-bit code，同时充当路由派生盐与 PAKE 盐——没有 code 的中
-间人（**包括 relay 本身**）无法完成握手。
+配对凭证是一个 256-bit code，同时充当路由派生盐与 PAKE 盐——没有 code 的中间人（**包括 relay 本身**）无法完成握手。
 
 ## 特性
 
@@ -37,7 +36,7 @@ PROTOCOL.md §7。
   code 的中间人既学不到东西也无法插入。
 - **免费额度友好**：每个 pairing 一间 Durable Object，建立在 WebSocket
   **Hibernation API** 上——空闲房间 isolate 被逐出，连着但不说话的 pairing
-  时长消耗 ≈ 0。7×24 挂 agent + 偶尔手机访问，稳稳落在 CF 免费额度内。
+  时长消耗 ≈ 0。7×24 挂 agent + 偶尔手机访问，落在 CF 免费额度内。
 - **零依赖 core**：`packages/core` 只用 WebCrypto，Node ≥ 18 / 浏览器 /
   Capacitor WebView 行为一致。
 - **实机打磨过**：手机射频掉线、大陆网络、代理、半死隧道——client 内置空闲
@@ -175,7 +174,7 @@ transcript 绑定、该常量时间的地方常量时间，但**未经形式化�
 已发布 npm：[`@hsinsekai-nanami/core`](https://www.npmjs.com/package/@hsinsekai-nanami/core)、
 [`@hsinsekai-nanami/agent`](https://www.npmjs.com/package/@hsinsekai-nanami/agent)、
 [`@hsinsekai-nanami/client`](https://www.npmjs.com/package/@hsinsekai-nanami/client)
-（npm 裸名 relay-kit 是别人的项目，所以用了个人 scope）。发布物为编译后的
+发布物为编译后的
 ESM（`dist/`，Node ≥ 18）+ d.ts + TS 源码。仓库内部仍按 TS 源码直接消费
 （bundler，或 Node ≥ 23 跑测试套件）。
 
