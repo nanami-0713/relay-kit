@@ -1,0 +1,35 @@
+{
+  "name": "@hsinsekai-nanami/client",
+  "version": "0.2.2",
+  "description": "Phone/browser side of the relay-e2e/v1 tunnel: E2E client + fetch/WebSocket over the tunnel",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nanami-0713/relay-kit.git",
+    "directory": "packages/client"
+  },
+  "bugs": "https://github.com/nanami-0713/relay-kit/issues",
+  "homepage": "https://github.com/nanami-0713/relay-kit#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@hsinsekai-nanami/core": "^0.2.2"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,11 @@
+node_modules/
+.DS_Store
+.wrangler/
+*.log
+workers/relay/wrangler.prod.toml
+.alma-snapshots
+.claude/
+.npmrc
+dist/
+packages/*/src/**/*.js
+packages/*/src/**/*.d.ts

@@ -1,0 +1,44 @@
+{
+  "name": "relay-kit",
+  "private": true,
+  "version": "0.2.3",
+  "description": "Out-of-the-box E2E relay server (relay-e2e/v1) for Cloudflare Workers — bring your CF account, deploy in one command. Ships with reference agent and client implementations.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "node test/smoke.mjs",
+    "test:pending": "node test/phone-before-agent.mjs",
+    "test:close": "node test/close-pending.mjs",
+    "test:watchdog": "node test/watchdog.mjs",
+    "test:dev": "node test/workers.mjs",
+    "build": "npm run build -w packages/core && npm run build -ws",
+    "typecheck": "tsc -p tsconfig.json && tsc -p workers/relay/tsconfig.json"
+  },
+  "keywords": [
+    "tunnel",
+    "relay",
+    "end-to-end-encryption",
+    "cloudflare-workers",
+    "durable-objects",
+    "websocket",
+    "pake",
+    "reverse-engineering"
+  ],
+  "engines": {
+    "node": ">=23"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nanami-0713/relay-kit.git"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261031.1",
+    "@types/node": "^24.19.2",
+    "@types/ws": "^8.18.2",
+    "typescript": "~5.9",
+    "wrangler": "^4.156.0"
+  }
+}

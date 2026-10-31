@@ -1,0 +1,32 @@
+{
+  "name": "@hsinsekai-nanami/core",
+  "version": "0.2.2",
+  "description": "E2E crypto + framing for the relay-e2e/v1 protocol (distilled from Alma's mobile relay)",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nanami-0713/relay-kit.git",
+    "directory": "packages/core"
+  },
+  "bugs": "https://github.com/nanami-0713/relay-kit/issues",
+  "homepage": "https://github.com/nanami-0713/relay-kit#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT"
+}

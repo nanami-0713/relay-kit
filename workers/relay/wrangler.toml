@@ -1,0 +1,21 @@
+name = "relay"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# Optional custom domain: *.workers.dev is SNI-blocked in some networks
+# (e.g. mainland China); a plain custom domain on the CF edge is usually
+# reachable directly. Uncomment and use your own domain (must be hosted
+# on the same Cloudflare account):
+#
+# routes = [
+#   { pattern = "relay.example.com", custom_domain = true }
+# ]
+
+[durable_objects]
+bindings = [
+  { name = "RELAY_ROOM", class_name = "RelayRoom" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayRoom"]
