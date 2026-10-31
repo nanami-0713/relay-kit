@@ -189,6 +189,41 @@ function makePhone() {
   phone.close();
 }
 
+{
+  // T7: diagnostics — an agent pointed at an unreachable relay must say so
+  // (connect + disconnect diag events: attributed error, non-empty hint,
+  // scheduled backoff), not fail in silence.
+  const diags7 = [];
+  const states7 = [];
+  const agent7 = new RelayAgent({
+    serverUrl: "http://127.0.0.1:9", // discard port: nothing listens there
+    code,
+    localPort: localSvcPort,
+    quiet: true, // the events are the assertion target; keep the output clean
+    onStateChange: (s) => states7.push(s.state),
+    onDiag: (e) => diags7.push(e),
+  });
+  agent7.start();
+  const deadline7 = Date.now() + 10_000;
+  await new Promise((resolve) => {
+    const check = () => (diags7.some((e) => e.type === "disconnect") || Date.now() > deadline7 ? resolve() : setTimeout(check, 20));
+    check();
+  });
+  agent7.stop();
+  const connect7 = diags7.find((e) => e.type === "connect");
+  const disconnect7 = diags7.find((e) => e.type === "disconnect");
+  assert.ok(connect7, "T7: connect diag fired");
+  assert.equal(connect7.attempt, 1);
+  assert.equal(connect7.server, "http://127.0.0.1:9");
+  assert.ok(connect7.proxy === null || typeof connect7.proxy === "string", "T7: proxy reported (null = direct)");
+  assert.ok(disconnect7, "T7: disconnect diag fired");
+  assert.ok(disconnect7.hint, "T7: disconnect hint non-empty");
+  assert.ok(disconnect7.nextRetryMs > 0, "T7: reconnect backoff scheduled");
+  assert.match(String(disconnect7.error), /ECONNREFUSED|closed|timed? ?out/i, `T7: failure attributed, got: ${disconnect7?.error}`);
+  assert.ok(states7.includes("connecting") && states7.includes("error"), "T7: went through connecting → error");
+  log("T7 unreachable-relay diagnostics (connect/disconnect events + hint + backoff) ✓");
+}
+
 // ---- Teardown ----------------------------------------------------------------
 agent.stop();
 await new Promise((r) => setTimeout(r, 200));

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.4 — 2026-10-31
+
+Connection diagnostics on both ends — the "why won't it connect" pass. Born
+from a real session of exactly that: a relay that wouldn't stay up and an
+agent side with zero log output.
+
+- **`RelayAgent` now says why it can't connect / why it dropped.** New
+  optional `onDiag(e: RelayDiagEvent)` callback plus a default one-line
+  `[RelayAgent]` console log per event (opt out with `quiet: true`; `onDiag`
+  still fires). Events: `connect{server,proxy,attempt}` (every attempt prints
+  the target host and whether a proxy is actually in play — env vars make
+  this non-obvious), `connected{attempt,ms}`, `disconnect{code,reason,error,hint,lastedMs,nextRetryMs,attempt}`,
+  `replaced{hint,lastedMs}`, `heartbeat-missed{lastedMs}`.
+- **Disconnect classifier**: close codes per PROTOCOL.md §9 (4000 preemption,
+  other 4xxx policy, 1001 going-away, 1006 silent death, 1015 TLS) plus Node
+  errno behind them (ECONNREFUSED / ENOTFOUND / ETIMEDOUT / ECONNRESET /
+  certificate errors) — each with a one-line hint. A bare `close 1006` log
+  line no longer hides `connect ECONNREFUSED`.
+- **`RelayTunnelClient` gets the minimal counterpart**: `onDiag` +
+  `[RelayClient]` console lines for tunnel establishment failures and
+  abnormal closes (1011 agent-offline, 4404 no-agent, 1006 radio-drop, wrong
+  code, …), each with a hint.
+- No protocol changes, no new dependencies; every new option is optional.
+  `@hsinsekai-nanami/agent` and `@hsinsekai-nanami/client` jump 0.2.2 →
+  0.2.4 (0.2.3 was server-side only and never cut as packages); core is
+  unchanged at 0.2.2.
+
 ## 0.2.3 — 2026-10-31
 
 Server hardening ahead of going public:

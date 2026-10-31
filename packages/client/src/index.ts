@@ -11,6 +11,56 @@ import { E2ESession, deriveRoutingToken } from "@hsinsekai-nanami/core";
 
 export type TunnelState = "idle" | "connecting" | "ready" | "error" | "closed";
 
+/** Why a tunnel died — one short line of attribution (close codes per
+ *  PROTOCOL.md §9). Browsers hide transport errors, so on the client the
+ *  close code is usually all there is to go on. */
+function closeHint(code: number | null, reason: string | null): string {
+  switch (code) {
+    case 1000:
+      return "closed normally";
+    case 1001:
+      return "relay went away — server shutdown or redeploy";
+    case 1006:
+      return "socket died without a close frame — radio drop, network switch, or NAT idle timeout; reconnect";
+    case 1011:
+      return "agent disconnected — the desktop side went offline; retry once it is back";
+    case 1015:
+      return "TLS handshake failed — TLS-intercepting middlebox or wrong scheme";
+    case 4404:
+      return "no agent registered for this pairing — is the desktop agent running, and is the code right?";
+  }
+  if (code !== null && code >= 4000 && code < 5000) return "relay policy rejection — see PROTOCOL.md §9";
+  if (reason) return `relay said: ${reason}`;
+  return "unexpected close — see PROTOCOL.md §9";
+}
+
+function failHint(error: string): string {
+  if (/timed out/i.test(error)) return "relay unreachable or slow — check the server URL and network path";
+  if (/authentication failed|auth-failed/i.test(error)) return "handshake rejected — wrong pairing code";
+  if (/Failed to open/i.test(error)) return "could not open the WebSocket — bad server URL, blocked network, or TLS issue";
+  if (/went silent/i.test(error)) return "no frame for idleTimeoutMs — radio sleep or half-dead socket; reconnect and retry";
+  if (/disconnected during pairing/i.test(error)) return "close() or a newer connect() interrupted this attempt";
+  if (/not connected/i.test(error)) return "tunnel was already down";
+  return "see PROTOCOL.md §9 and the relay's own logs (wrangler tail)";
+}
+
+/** Connection diagnostics (the client-side counterpart of the agent's
+ *  RelayDiagEvent, minimal): every event also lands on the console as a
+ *  `[RelayClient]` line unless `quiet` is set. */
+export type TunnelDiagEvent =
+  | { type: "connect"; server: string }
+  | { type: "ready"; ms: number }
+  | {
+      type: "disconnect"; // the WS closed (with a close frame or 1006)
+      code: number | null;
+      reason: string | null;
+      error: string | null; // composed message, e.g. "Relay tunnel closed (1011 agent disconnected)"
+      hint: string;
+      lastedMs: number | null; // how long the tunnel had been ready (null = it never got there)
+      byUser: boolean;
+    }
+  | { type: "failed"; error: string; hint: string; byUser: boolean }; // establishment/watchdog/handshake failure — no close code to read
+
 export interface RelayTunnelClientOpts {
   serverUrl: string; // https://relay.example.workers.dev
   code: string; // pairing code shared with the agent
@@ -23,6 +73,11 @@ export interface RelayTunnelClientOpts {
   // "no frame arrived" is the only liveness signal there is.
   idleTimeoutMs?: number;
   onStateChange?: (state: TunnelState, detail?: string) => void;
+  /** Connection diagnostics (connect/ready/disconnect/failed). Fires
+   *  regardless of `quiet`. */
+  onDiag?: (e: TunnelDiagEvent) => void;
+  /** Silence the default `[RelayClient]` console lines. onDiag still fires. */
+  quiet?: boolean;
 }
 
 interface PendingHttp {
@@ -130,6 +185,20 @@ function b64u(bytes: Uint8Array): string {
   return btoa(s);
 }
 
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+function fmtDuration(ms: number): string {
+  if (ms < 1_000) return `${ms} ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)} s`;
+  return `${(ms / 60_000).toFixed(1)} min`;
+}
+
 export class RelayTunnelClient {
   #opts: RelayTunnelClientOpts;
   #ws: WebSocket | null = null;
@@ -143,6 +212,8 @@ export class RelayTunnelClient {
   #watchdogTimer: any = null;
   #lastFrameAt = 0;
   #epoch = 0;
+  #connectStartedAt: number | null = null;
+  #readyAt: number | null = null;
 
   constructor(opts: RelayTunnelClientOpts) {
     this.#opts = opts;
@@ -157,10 +228,38 @@ export class RelayTunnelClient {
     this.#opts.onStateChange?.(s, detail);
   }
 
+  // every diag event goes to the console (one line, unless quiet) and to
+  // onDiag (always; user callbacks must never break the client)
+  #diag(e: TunnelDiagEvent) {
+    if (!this.#opts.quiet) {
+      if (e.type === "connect") {
+        console.log(`[RelayClient] connecting to ${hostOf(e.server)}`);
+      } else if (e.type === "ready") {
+        console.log(`[RelayClient] tunnel ready (${e.ms} ms)`);
+      } else if (e.type === "disconnect") {
+        if (!e.byUser) {
+          const lasted = e.lastedMs != null ? ` after ${fmtDuration(e.lastedMs)}` : " before ready";
+          const cause = e.error ?? `close ${e.code}`;
+          console.warn(`[RelayClient] tunnel closed${lasted}: ${cause} — ${e.hint}`);
+        }
+      } else {
+        if (!e.byUser) console.warn(`[RelayClient] tunnel failed: ${e.error} — ${e.hint}`);
+      }
+    }
+    try {
+      this.#opts.onDiag?.(e);
+    } catch (e2) {
+      console.warn("[RelayClient] onDiag threw:", e2);
+    }
+  }
+
   async connect(): Promise<void> {
     if (this.#state === "connecting" || this.#state === "ready") return this.ready();
     this.#closedByUser = false;
     this.#setState("connecting");
+    this.#connectStartedAt = Date.now();
+    this.#readyAt = null; // a fresh tunnel's lifetime starts from its own ready
+    this.#diag({ type: "connect", server: this.#opts.serverUrl });
     const epoch = ++this.#epoch;
     this.#detach(); // a leftover socket from an earlier failed run must not leak frames into this one
     const WS = this.#opts.WebSocketImpl ?? globalThis.WebSocket;
@@ -184,8 +283,10 @@ export class RelayTunnelClient {
         if (this.#ws !== ws) return;
         clearTimeout(this.#connectTimer);
         this.#lastFrameAt = Date.now();
+        this.#readyAt = Date.now();
         this.#startWatchdog();
         this.#setState("ready");
+        this.#diag({ type: "ready", ms: this.#connectStartedAt ? Date.now() - this.#connectStartedAt : 0 });
         for (const w of this.#readyWaiters) w.resolve();
         this.#readyWaiters = [];
       },
@@ -208,7 +309,7 @@ export class RelayTunnelClient {
       // "1011 agent disconnected" tell the app what actually died, while a
       // bare 1006 means the socket vanished without a word.
       const why = `Relay tunnel closed (${ev.code}${ev.reason ? ` ${ev.reason}` : ""})`;
-      this.#handleClose(why);
+      this.#handleClose(why, ev.code, ev.reason || null);
     };
     ws.onerror = () => {
       if (this.#ws === ws && this.#state === "connecting") this.#fail("Failed to open relay tunnel");
@@ -293,6 +394,7 @@ export class RelayTunnelClient {
     for (const w of this.#readyWaiters) w.reject(new Error(message));
     this.#readyWaiters = [];
     this.#setState("error", message);
+    this.#diag({ type: "failed", error: message, hint: failHint(message), byUser: this.#closedByUser });
   }
 
   #rejectPending(e: Error) {
@@ -302,12 +404,21 @@ export class RelayTunnelClient {
     this.#sockets.clear();
   }
 
-  #handleClose(reason: string) {
+  #handleClose(reason: string, code: number | null = null, closeReason: string | null = null) {
     this.#stopWatchdog();
     this.#rejectPending(new Error(reason));
     for (const w of this.#readyWaiters) w.reject(new Error(reason));
     this.#readyWaiters = [];
     this.#setState(this.#closedByUser ? "closed" : "error", reason);
+    this.#diag({
+      type: "disconnect",
+      code,
+      reason: closeReason,
+      error: reason,
+      hint: closeHint(code, closeReason),
+      lastedMs: this.#readyAt ? Date.now() - this.#readyAt : null,
+      byUser: this.#closedByUser,
+    });
   }
 
   #send(frame: any) {

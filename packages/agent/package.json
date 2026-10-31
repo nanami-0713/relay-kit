@@ -1,6 +1,6 @@
 {
   "name": "@hsinsekai-nanami/agent",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "description": "Desktop-side relay agent: outbound WS to the relay, tunnels HTTP/WS frames to a local port",
   "type": "module",
   "main": "dist/index.js",

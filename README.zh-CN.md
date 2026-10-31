@@ -100,7 +100,7 @@ CLI 会打印配对码与手机侧连接 URL。另一端用 `packages/client` �
 
 | 文件 | 覆盖 |
 |---|---|
-| `test/smoke.mjs` | 本地夹具全链路：HTTP GET/POST、WS 隧道、错码拒绝、双 agent 抢占、fetch 取消（hcancel） |
+| `test/smoke.mjs` | 本地夹具全链路：HTTP GET/POST、WS 隧道、错码拒绝、双 agent 抢占、fetch 取消（hcancel）、不可达 relay 诊断 |
 | `test/phone-before-agent.mjs` | client 先于 agent 到达——早帧缓冲与回放 |
 | `test/close-pending.mjs` | 未配对 client 的拆除路径 |
 | `test/watchdog.mjs` | 空闲看门狗收割半死隧道而非挂死请求 |
@@ -114,6 +114,41 @@ CLI 会打印配对码与手机侧连接 URL。另一端用 `packages/client` �
 `HTTPS_PROXY` 环境变量）。手机端要长期可靠，建议把托管在同一 CF 账号的
 **自定义域名**绑给 Worker：CF 边缘上的普通自定义域名大陆通常直连可达，手机
 免代理。示例见 `workers/relay/wrangler.toml`。
+
+## 诊断
+
+两端都会告诉你为什么连不上 / 为什么断了，不再静默失败。默认开启——agent CLI
+无需任何额外参数：
+
+```
+[RelayAgent] connect attempt 1 → relay.example.workers.dev (proxy: none)
+[RelayAgent] connected to relay server (attempt 1, 812 ms)
+[RelayAgent] disconnected after 14.2 min (attempt 1): read ECONNRESET — connection reset mid-path — proxy/firewall cut it; a retry usually recovers — retrying in 1000 ms
+[RelayAgent] disconnected after 3.1 min: another agent took this pairing — call reconnect() to reclaim it
+```
+
+每次连接尝试都打印目标 host 与实际是否走代理（`proxy: none` 即直连——设置了
+`HTTPS_PROXY` 时，靠这行确认它真的被捡起来了）。断线时按关闭码
+（PROTOCOL.md §9）或藏在无声 1006 背后的 Node errno（`ECONNREFUSED`、
+`ENOTFOUND`、TLS 错误……）给出一句话归因，附带连接存活时长、重试次数与下次
+退避。
+
+要结构化消费就传 `onDiag`——只要回调不要 console 输出的话加 `quiet: true`：
+
+```ts
+import { RelayAgent, type RelayDiagEvent } from "@hsinsekai-nanami/agent";
+
+const agent = new RelayAgent({
+  /* …其余选项同前… */
+  onDiag: (e: RelayDiagEvent) => telemetry.log("relay", e),
+  quiet: true,
+});
+```
+
+`RelayTunnelClient`（`@hsinsekai-nanami/client`）带对等的最小实现：`onDiag` +
+`[RelayClient]` 前缀日志（同样可用 `quiet` 关闭），覆盖隧道建立失败与异常关闭
+——`1011` agent 掉线、`4404` 迟迟无 agent 注册、`1006` 射频掉线、配对码错误
+——各配一句 hint。
 
 ## 安全与威胁模型
 

@@ -113,7 +113,7 @@ gateway API behind a local dashboard, a dev server, anything.
 
 | File | Covers |
 |---|---|
-| `test/smoke.mjs` | Full e2e against the local fixture: HTTP GET/POST, WS tunnel, wrong-code rejection, dual-agent preemption, fetch abort (hcancel) |
+| `test/smoke.mjs` | Full e2e against the local fixture: HTTP GET/POST, WS tunnel, wrong-code rejection, dual-agent preemption, fetch abort (hcancel), unreachable-relay diagnostics |
 | `test/phone-before-agent.mjs` | Client arrives before the agent — early frames buffer and replay |
 | `test/close-pending.mjs` | Teardown of a pending (not-yet-paired) client |
 | `test/watchdog.mjs` | Idle watchdog reaps half-dead tunnels instead of hanging requests |
@@ -128,6 +128,44 @@ gateway API behind a local dashboard, a dev server, anything.
 **custom domain** hosted on the same Cloudflare account to the Worker: a plain
 custom domain on the CF edge is usually directly reachable, so the phone needs
 no proxy at all. See the commented example in `workers/relay/wrangler.toml`.
+
+## Diagnostics
+
+Both ends tell you why they can't connect (or why they dropped) instead of
+failing in silence. On by default — the agent CLI needs no extra flags:
+
+```
+[RelayAgent] connect attempt 1 → relay.example.workers.dev (proxy: none)
+[RelayAgent] connected to relay server (attempt 1, 812 ms)
+[RelayAgent] disconnected after 14.2 min (attempt 1): read ECONNRESET — connection reset mid-path — proxy/firewall cut it; a retry usually recovers — retrying in 1000 ms
+[RelayAgent] disconnected after 3.1 min: another agent took this pairing — call reconnect() to reclaim it
+```
+
+Every attempt logs the target host and whether a proxy is actually in play
+(`proxy: none` means direct — with `HTTPS_PROXY` set, that line is how you
+verify it was picked up). Disconnects classify the close code
+(PROTOCOL.md §9) or the Node errno hiding behind a silent 1006
+(`ECONNREFUSED`, `ENOTFOUND`, TLS errors, …) into a one-line hint, with the
+connection's lifetime, retry count and next backoff attached.
+
+For structured use, pass `onDiag` — and `quiet: true` if you only want the
+callback, not the console lines:
+
+```ts
+import { RelayAgent, type RelayDiagEvent } from "@hsinsekai-nanami/agent";
+
+const agent = new RelayAgent({
+  /* …same options as before… */
+  onDiag: (e: RelayDiagEvent) => telemetry.log("relay", e),
+  quiet: true,
+});
+```
+
+`RelayTunnelClient` (`@hsinsekai-nanami/client`) ships the minimal
+counterpart: `onDiag` + `[RelayClient]` console lines (same `quiet` opt-out)
+covering tunnel establishment failures and abnormal closes — `1011` agent
+offline, `4404` no agent registered, `1006` radio drop, wrong pairing code —
+each with a hint.
 
 ## Security & threat model
 

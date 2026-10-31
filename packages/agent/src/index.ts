@@ -14,6 +14,53 @@ import { E2EResponder } from "./responder.ts";
 
 export type RelayAgentState = "stopped" | "connecting" | "connected" | "error" | "replaced";
 
+/** Why a connection ended — one short line of attribution, not an essay.
+ *  Codes per PROTOCOL.md §9; Node errno from the transport error when there
+ *  was one (a bare 1006 close usually hides ECONNREFUSED / TLS / DNS). */
+function classifyDisconnect(code: number | null, errCode: string | null, error: string | null): string {
+  if (errCode === "ECONNREFUSED") return "connection refused — wrong server URL/port, or relay down";
+  if (errCode === "ENOTFOUND" || errCode === "EAI_AGAIN") return "DNS lookup failed — check the server hostname";
+  if (errCode === "ETIMEDOUT") return "timed out reaching the relay — blocked or slow network path";
+  if (errCode === "ECONNRESET" || errCode === "EPIPE") return "connection reset mid-path — proxy/firewall cut it; a retry usually recovers";
+  if (errCode && /CERT|TLS|EPROTO/.test(errCode)) return "TLS failed — certificate problem or a TLS-intercepting middlebox";
+  switch (code) {
+    case 1000:
+      return "closed normally";
+    case 1001:
+      return "relay went away — server shutdown or redeploy";
+    case 1006:
+      return "socket died without a close frame — network switch, NAT idle timeout, or blocked path (a proxy may fix it)";
+    case 1015:
+      return "TLS handshake failed — TLS-intercepting middlebox or wrong scheme";
+    case 4000:
+      return "another agent took this pairing — reconnect() to reclaim it";
+    case 1011:
+      return "relay internal error";
+  }
+  if (code !== null && code >= 4000 && code < 5000) return "relay policy rejection — see PROTOCOL.md §9";
+  if (error) return "transport error — see the message above";
+  return "unexpected close — see PROTOCOL.md §9";
+}
+
+/** Connection diagnostics: every attempt, failure, and takeover is reported
+ *  here and (unless `quiet`) as a one-line `[RelayAgent]` console message.
+ *  Field names stay flat and greppable. */
+export type RelayDiagEvent =
+  | { type: "connect"; server: string; proxy: string | null; attempt: number }
+  | { type: "connected"; attempt: number; ms: number }
+  | {
+      type: "disconnect";
+      code: number | null; // WS close code (1006 when the transport died silently), null if we never got a socket
+      reason: string | null; // close reason text when the server sent one
+      error: string | null; // transport/protocol error message, e.g. "connect ECONNREFUSED 127.0.0.1:9"
+      hint: string; // one-line attribution from the disconnect classifier
+      lastedMs: number | null; // how long this connection had been up (null = never connected)
+      nextRetryMs: number | null; // scheduled backoff before the next attempt (null = no retry: stopped/replaced)
+      attempt: number; // which attempt just died (1-based, resets after a successful connect)
+    }
+  | { type: "replaced"; hint: string; lastedMs: number | null }
+  | { type: "heartbeat-missed"; lastedMs: number | null };
+
 export interface RelayAgentConfig {
   serverUrl: string;
   code: string;
@@ -23,6 +70,11 @@ export interface RelayAgentConfig {
    *  where *.workers.dev is unreachable directly. Falls back to env proxy vars. */
   proxy?: string;
   onStateChange?: (status: RelayAgentStatus) => void;
+  /** Connection diagnostics (connect/connected/disconnect/replaced/heartbeat-missed).
+   *  Fires regardless of `quiet`. */
+  onDiag?: (e: RelayDiagEvent) => void;
+  /** Silence the default `[RelayAgent]` console lines. onDiag still fires. */
+  quiet?: boolean;
 }
 
 export interface RelayAgentStatus {
@@ -38,6 +90,20 @@ const HEARTBEAT_MS = 15_000;
 const BACKPRESSURE_BYTES = 16 * 1024 * 1024;
 const CHUNK_SIZE = 32_768;
 
+function fmtDuration(ms: number): string {
+  if (ms < 1_000) return `${ms} ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)} s`;
+  return `${(ms / 60_000).toFixed(1)} min`;
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 export class RelayAgent {
   #config: RelayAgentConfig;
   #ws: WebSocket | null = null;
@@ -51,6 +117,10 @@ export class RelayAgent {
   #httpAborts = new Map<string, AbortController>();
   #localSockets = new Map<string, WebSocket>();
   #responders = new Map<string, E2EResponder>();
+  #attempt = 0; // 1-based; reset after a successful connect and on explicit reconnect()
+  #connectStartedAt: number | null = null;
+  #lastWsError: string | null = null; // transport error message from the socket that just died
+  #lastErrCode: string | null = null; // Node errno (ECONNREFUSED, …) behind it
 
   constructor(config: RelayAgentConfig) {
     this.#config = config;
@@ -76,6 +146,42 @@ export class RelayAgent {
     }
   }
 
+  // every diag event goes to the console (one line, unless quiet) and to
+  // onDiag (always; user callbacks must never break the agent)
+  #diag(e: RelayDiagEvent) {
+    if (!this.#config.quiet) {
+      if (e.type === "connect") {
+        console.log(`[RelayAgent] connect attempt ${e.attempt} → ${hostOf(e.server)} (proxy: ${e.proxy ?? "none"})`);
+      } else if (e.type === "connected") {
+        console.log(`[RelayAgent] connected to relay server (attempt ${e.attempt}, ${e.ms} ms)`);
+      } else if (e.type === "disconnect") {
+        const cause = e.error ?? `close ${e.code}`;
+        const retry = e.nextRetryMs != null ? ` — retrying in ${e.nextRetryMs} ms` : "";
+        const lasted = e.lastedMs != null ? ` after ${fmtDuration(e.lastedMs)}` : "";
+        console.warn(`[RelayAgent] disconnected${lasted} (attempt ${e.attempt}): ${cause} — ${e.hint}${retry}`);
+      } else if (e.type === "replaced") {
+        const lasted = e.lastedMs != null ? ` after ${fmtDuration(e.lastedMs)}` : "";
+        console.warn(`[RelayAgent] disconnected${lasted}: ${e.hint}`);
+      } else {
+        const lasted = e.lastedMs != null ? ` after ${fmtDuration(e.lastedMs)}` : "";
+        console.warn(`[RelayAgent] relay stopped answering pings${lasted} — reconnecting`);
+      }
+    }
+    try {
+      this.#config.onDiag?.(e);
+    } catch (e2) {
+      console.warn("[RelayAgent] onDiag threw:", e2);
+    }
+  }
+
+  // "" (live.mjs's `--proxy ""` = force-direct, or an empty env var) is no
+  // proxy — normalizing here keeps both the socket path and the diag line
+  // truthful instead of printing a baffling "(proxy: )"
+  #resolveProxy(): string | null {
+    const p = this.#config.proxy ?? process.env.HTTPS_PROXY ?? process.env.https_proxy ?? process.env.HTTP_PROXY ?? process.env.http_proxy ?? null;
+    return p && p.trim() ? p : null;
+  }
+
   start() {
     this.#stopped = false;
     void this.#connect();
@@ -84,6 +190,7 @@ export class RelayAgent {
   reconnect() {
     if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer), (this.#reconnectTimer = null);
     this.#reconnectDelay = BASE_RECONNECT_MS;
+    this.#attempt = 0; // user-initiated: a fresh attempt series
     this.#stopped = false;
     this.#stopHeartbeat();
     if (this.#ws) {
@@ -116,6 +223,11 @@ export class RelayAgent {
   async #connect() {
     if (this.#stopped) return;
     this.#setState("connecting");
+    this.#attempt += 1;
+    this.#connectStartedAt = Date.now();
+    // the proxy line matters: with env vars in play, users often don't know
+    // whether they're actually going direct or through a proxy
+    this.#diag({ type: "connect", server: this.#config.serverUrl, proxy: this.#resolveProxy(), attempt: this.#attempt });
     try {
       const routingToken = await deriveRoutingToken(this.#config.code);
       const tokenHash = await sha256Hex(routingToken);
@@ -127,8 +239,10 @@ export class RelayAgent {
 
   #openSocket(tokenHash: string) {
     if (this.#stopped) return;
+    this.#lastWsError = null;
+    this.#lastErrCode = null;
     const base = this.#config.serverUrl.replace(/\/+$/, "").replace(/^http/, "ws");
-    const proxy = this.#config.proxy ?? process.env.HTTPS_PROXY ?? process.env.https_proxy ?? process.env.HTTP_PROXY ?? process.env.http_proxy;
+    const proxy = this.#resolveProxy();
     const agent = proxy ? new HttpsProxyAgent(proxy) : undefined;
     const ws = new WebSocket(`${base}/agent?th=${tokenHash}`, { maxPayload: 268435456, ...(agent ? { agent } : {}) });
     this.#ws = ws;
@@ -149,11 +263,20 @@ export class RelayAgent {
       if (this.#ws !== ws) return;
       this.#ws = null;
       this.#stopHeartbeat();
-      if (code === 4000) this.#onReplaced();
-      else this.#onDisconnect(code === 1000 ? null : `Relay connection closed (${code}${reason?.length ? `: ${reason}` : ""})`);
+      if (code === 4000) {
+        this.#onReplaced();
+        return;
+      }
+      // a transport error (ECONNREFUSED, TLS, …) says more than the bare 1006
+      // close that follows it — prefer it when the socket produced one
+      const error =
+        code === 1000 ? null : this.#lastWsError ?? `Relay connection closed (${code}${reason?.length ? `: ${reason}` : ""})`;
+      this.#onDisconnect(error, { code, reason: reason?.length ? reason.toString() : null, errCode: this.#lastErrCode });
     });
     ws.on("error", (e: Error) => {
       this.#lastError = e.message;
+      this.#lastWsError = e.message;
+      this.#lastErrCode = (e as NodeJS.ErrnoException).code ?? null;
     });
   }
 
@@ -166,7 +289,7 @@ export class RelayAgent {
     this.#heartbeatTimer = setInterval(() => {
       if (this.#ws === ws && ws.readyState === WebSocket.OPEN) {
         if (missed) {
-          console.warn("[RelayAgent] Relay stopped answering pings; reconnecting");
+          this.#diag({ type: "heartbeat-missed", lastedMs: this.#connectedAt ? Date.now() - this.#connectedAt : null });
           ws.terminate();
           return;
         }
@@ -184,24 +307,40 @@ export class RelayAgent {
   }
 
   #onReplaced() {
+    const hint = "another agent took over this pairing — call reconnect() to reclaim it";
     this.#teardownTunnels();
+    const lastedMs = this.#connectedAt ? Date.now() - this.#connectedAt : null;
     this.#connectedAt = null;
+    this.#diag({ type: "replaced", hint, lastedMs });
     if (this.#stopped) {
       this.#setState("stopped");
     } else {
       this.#lastError = "Another agent took over this pairing";
-      console.warn("[RelayAgent] Another agent took over this pairing; staying disconnected until reconnect()");
       this.#setState("replaced");
     }
   }
 
-  #onDisconnect(error: string | null) {
+  #onDisconnect(
+    error: string | null,
+    close: { code: number; reason: string | null; errCode: string | null } | null = null,
+  ) {
     this.#teardownTunnels();
+    const lastedMs = this.#connectedAt ? Date.now() - this.#connectedAt : null;
     this.#connectedAt = null;
     if (error) {
       this.#lastError = error;
       this.#setState("error");
     }
+    this.#diag({
+      type: "disconnect",
+      code: close?.code ?? null,
+      reason: close?.reason ?? null,
+      error,
+      hint: classifyDisconnect(close?.code ?? null, close?.errCode ?? null, error),
+      lastedMs,
+      nextRetryMs: this.#stopped ? null : this.#reconnectDelay,
+      attempt: this.#attempt,
+    });
     if (this.#stopped) {
       this.#setState("stopped");
       return;
@@ -244,12 +383,17 @@ export class RelayAgent {
         this.#connectedAt = Date.now();
         this.#setState("connected");
         this.#reconnectDelay = BASE_RECONNECT_MS;
-        console.log("[RelayAgent] Connected to relay server");
+        this.#diag({
+          type: "connected",
+          attempt: this.#attempt,
+          ms: this.#connectStartedAt ? Date.now() - this.#connectStartedAt : 0,
+        });
+        this.#attempt = 0; // a later failure starts a fresh 1-based series
         break;
       case "error":
         this.#lastError = String(frame.message || "Relay error");
         this.#setState("error");
-        console.error("[RelayAgent] Relay rejected connection:", this.#lastError);
+        if (!this.#config.quiet) console.error("[RelayAgent] Relay rejected connection:", this.#lastError);
         break;
       case "hreq":
         void this.#proxyHttp(frame);

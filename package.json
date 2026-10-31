@@ -1,7 +1,7 @@
 {
   "name": "relay-kit",
   "private": true,
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Out-of-the-box E2E relay server (relay-e2e/v1) for Cloudflare Workers — bring your CF account, deploy in one command. Ships with reference agent and client implementations.",
   "type": "module",
   "workspaces": [

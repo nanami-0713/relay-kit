@@ -1,6 +1,6 @@
 {
   "name": "@hsinsekai-nanami/client",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "description": "Phone/browser side of the relay-e2e/v1 tunnel: E2E client + fetch/WebSocket over the tunnel",
   "type": "module",
   "main": "dist/index.js",
