@@ -36,7 +36,9 @@ function closeHint(code: number | null, reason: string | null): string {
 
 function failHint(error: string): string {
   if (/timed out/i.test(error)) return "relay unreachable or slow — check the server URL and network path";
+  if (/Could not open a WebSocket/i.test(error)) return "relay unreachable — wrong server URL, DNS failure, or a blocked network path";
   if (/authentication failed|auth-failed/i.test(error)) return "handshake rejected — wrong pairing code";
+  if (/did not complete the E2E handshake/i.test(error)) return "relay is fine but the desktop agent never answered — it is offline, or the code points elsewhere";
   if (/Failed to open/i.test(error)) return "could not open the WebSocket — bad server URL, blocked network, or TLS issue";
   if (/went silent/i.test(error)) return "no frame for idleTimeoutMs — radio sleep or half-dead socket; reconnect and retry";
   if (/disconnected during pairing/i.test(error)) return "close() or a newer connect() interrupted this attempt";
@@ -49,6 +51,11 @@ function failHint(error: string): string {
  *  `[RelayClient]` line unless `quiet` is set. */
 export type TunnelDiagEvent =
   | { type: "connect"; server: string }
+  // the transport WebSocket opened — the relay is reachable; everything after
+  // this (handshake, frames) is tunnel content. The two failure classes apps
+  // care about — "can't reach the relay" vs "relay OK, desktop agent missing" —
+  // split exactly here.
+  | { type: "socket-open"; server: string }
   | { type: "ready"; ms: number }
   | {
       type: "disconnect"; // the WS closed (with a close frame or 1006)
@@ -59,13 +66,29 @@ export type TunnelDiagEvent =
       lastedMs: number | null; // how long the tunnel had been ready (null = it never got there)
       byUser: boolean;
     }
-  | { type: "failed"; error: string; hint: string; byUser: boolean }; // establishment/watchdog/handshake failure — no close code to read
+  | {
+      type: "failed"; // establishment/watchdog/handshake failure — no close code to read
+      error: string;
+      hint: string;
+      byUser: boolean;
+      // "socket" = the WebSocket never opened (relay unreachable / wrong URL /
+      // blocked path); "handshake" = it opened but the E2E handshake never
+      // completed (no desktop agent behind the code, or a dead one);
+      // "ready" = the tunnel was up and died mid-flight (watchdog etc.).
+      phase: "socket" | "handshake" | "ready";
+    };
 
 export interface RelayTunnelClientOpts {
   serverUrl: string; // https://relay.example.workers.dev
   code: string; // pairing code shared with the agent
   WebSocketImpl?: typeof WebSocket;
   connectTimeoutMs?: number;
+  // Budget for the E2E handshake AFTER the WebSocket opens. Must exceed the
+  // relay's no-agent window (60s, PROTOCOL §5): when the desktop agent is
+  // offline the server closes with 4404 "No agent connected" — a reason the
+  // app can act on. A single short connectTimeoutMs used to cut the socket
+  // at 20s first, so agent-offline looked identical to relay-unreachable.
+  handshakeTimeoutMs?: number;
   // A phone's radio can drop without a close frame ever arriving, leaving a
   // request pending forever. While anything is pending, a tunnel this quiet
   // for idleTimeoutMs is declared dead and everything on it fails — the app
@@ -214,6 +237,7 @@ export class RelayTunnelClient {
   #epoch = 0;
   #connectStartedAt: number | null = null;
   #readyAt: number | null = null;
+  #connectPhase: "socket" | "handshake" | "ready" = "socket";
 
   constructor(opts: RelayTunnelClientOpts) {
     this.#opts = opts;
@@ -234,6 +258,8 @@ export class RelayTunnelClient {
     if (!this.#opts.quiet) {
       if (e.type === "connect") {
         console.log(`[RelayClient] connecting to ${hostOf(e.server)}`);
+      } else if (e.type === "socket-open") {
+        console.log(`[RelayClient] relay reachable (${hostOf(e.server)}), waiting for the desktop agent`);
       } else if (e.type === "ready") {
         console.log(`[RelayClient] tunnel ready (${e.ms} ms)`);
       } else if (e.type === "disconnect") {
@@ -261,6 +287,7 @@ export class RelayTunnelClient {
     this.#readyAt = null; // a fresh tunnel's lifetime starts from its own ready
     this.#diag({ type: "connect", server: this.#opts.serverUrl });
     const epoch = ++this.#epoch;
+    this.#connectPhase = "socket";
     this.#detach(); // a leftover socket from an earlier failed run must not leak frames into this one
     const WS = this.#opts.WebSocketImpl ?? globalThis.WebSocket;
     const routingToken = await deriveRoutingToken(this.#opts.code);
@@ -270,7 +297,13 @@ export class RelayTunnelClient {
     (ws as any).binaryType = "arraybuffer";
     this.#ws = ws;
     this.#connectTimer = setTimeout(() => {
-      this.#fail("Encrypted relay connection timed out");
+      // Phase decides the message: pre-open is a network-path failure; a
+      // silent post-open stretch is the agent never answering the handshake.
+      this.#fail(
+        this.#connectPhase === "socket"
+          ? "Could not open a WebSocket to the relay (timed out)"
+          : "Desktop agent did not complete the E2E handshake (timed out)",
+      );
       try {
         ws.close();
       } catch {}
@@ -282,6 +315,7 @@ export class RelayTunnelClient {
       onReady: () => {
         if (this.#ws !== ws) return;
         clearTimeout(this.#connectTimer);
+        this.#connectPhase = "ready";
         this.#lastFrameAt = Date.now();
         this.#readyAt = Date.now();
         this.#startWatchdog();
@@ -294,7 +328,22 @@ export class RelayTunnelClient {
       onError: (m) => this.#fail(m),
     });
     this.#session = session;
-    ws.onopen = () => void session.start();
+    ws.onopen = () => {
+      // Socket open = relay reachable. Re-arm the timer onto the handshake
+      // budget (default 70s > the relay's 60s no-agent window) so the
+      // server's 4404 close — which names the real cause — beats this
+      // local timeout instead of the other way around.
+      this.#connectPhase = "handshake";
+      this.#diag({ type: "socket-open", server: this.#opts.serverUrl });
+      clearTimeout(this.#connectTimer);
+      this.#connectTimer = setTimeout(() => {
+        this.#fail("Desktop agent did not complete the E2E handshake (timed out)");
+        try {
+          ws.close();
+        } catch {}
+      }, this.#opts.handshakeTimeoutMs ?? 70_000);
+      void session.start();
+    };
     ws.onmessage = (ev: MessageEvent) => {
       if (this.#ws !== ws) return; // a replaced tunnel's late frames must not touch this one
       const data = ev.data;
@@ -394,7 +443,7 @@ export class RelayTunnelClient {
     for (const w of this.#readyWaiters) w.reject(new Error(message));
     this.#readyWaiters = [];
     this.#setState("error", message);
-    this.#diag({ type: "failed", error: message, hint: failHint(message), byUser: this.#closedByUser });
+    this.#diag({ type: "failed", error: message, hint: failHint(message), byUser: this.#closedByUser, phase: this.#connectPhase });
   }
 
   #rejectPending(e: Error) {

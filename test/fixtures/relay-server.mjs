@@ -6,7 +6,10 @@ import http from "node:http";
 import crypto from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 
-export function startRelayServer(port = 0) {
+export function startRelayServer(port = 0, opts = {}) {
+  // How long a phone with no registered agent waits before the server closes
+  // it with 4404 (PROTOCOL §5 says 60s; tests shrink it to stay fast).
+  const NO_AGENT_TIMEOUT_MS = opts.noAgentTimeoutMs ?? 60_000;
   const server = http.createServer((req, res) => {
     res.writeHead(404).end("not found");
   });
@@ -155,7 +158,7 @@ const EARLY_MAX_BYTES = 64 * 1024;
       } else {
         if (!room.agent || room.agent.readyState !== WebSocket.OPEN) {
           room.pending.push(ws);
-          pendingDeadlines.set(ws, Date.now() + 60_000);
+          pendingDeadlines.set(ws, Date.now() + NO_AGENT_TIMEOUT_MS);
           // buffer, don't drop: the E2E initiator sends its hello the moment
           // its socket opens — without this the frame is lost, and the agent
           // that arrives later waits for a hello that already vanished

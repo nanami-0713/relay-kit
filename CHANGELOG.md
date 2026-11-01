@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.5 — 2026-11-01
+
+The two field failures every magpie-relay phone user hits, made legible —
+and one of them made self-healing.
+
+- **Client: "relay unreachable" and "relay OK, agent offline" are now
+  different failures.** `RelayTunnelClient` tracks the connect phase:
+  `connectTimeoutMs` (20s, unchanged) covers opening the WebSocket; once it
+  opens, a new `handshakeTimeoutMs` (default 70s) covers the E2E handshake.
+  The 70s budget outlives the relay's 60s no-agent window, so an offline
+  desktop side now surfaces as the server's `4404 No agent connected` close
+  (with its actionable hint) instead of a local "timed out" that was
+  indistinguishable from a blocked network path. New `socket-open` diag
+  event and a `phase: "socket" | "handshake" | "ready"` field on `failed`
+  events; phase-specific timeout messages.
+- **Agent: opt-in pairing reclaim (`reclaimMs`).** Spec default unchanged —
+  a 4000 takeover parks the agent in `replaced` until an explicit
+  `reconnect()`. Appliances (magpie-relay's `start.mjs`) can now opt in:
+  after the delay the agent re-registers and takes the pairing back, ×2
+  backoff per contested reclaim (stable = held ≥ 60s), capped at
+  `reclaimMaxMs` (default 10 min). Fixes the "preempted once by a zombie
+  laptop, offline until someone restarts me" failure mode.
+- Fixture relay: `startRelayServer(port, { noAgentTimeoutMs })` so tests can
+  shrink the 60s window. No wire-protocol changes; both new options are
+  optional. PROTOCOL.md §3/§5/§9 updated. New test: `test/agent-offline.mjs`
+  (`npm run test:offline`).
+
 ## 0.2.4 — 2026-10-31
 
 Connection diagnostics on both ends — the "why won't it connect" pass. Born

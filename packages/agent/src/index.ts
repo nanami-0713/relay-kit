@@ -69,6 +69,14 @@ export interface RelayAgentConfig {
   /** HTTP(S) proxy for reaching the relay, e.g. http://127.0.0.1:7897 — needed
    *  where *.workers.dev is unreachable directly. Falls back to env proxy vars. */
   proxy?: string;
+  /** Appliance mode: after a 4000 takeover, re-register and reclaim the
+   *  pairing after this delay instead of parking in "replaced" until an
+   *  explicit reconnect(). Default 0 = spec behavior (park). Escalates ×2 per
+   *  reclaim that is itself replaced within RECLAIM_STABLE_MS, capped at
+   *  reclaimMaxMs — two always-on reclaiming agents trade the pairing at a
+   *  widening interval instead of thrashing. */
+  reclaimMs?: number;
+  reclaimMaxMs?: number;
   onStateChange?: (status: RelayAgentStatus) => void;
   /** Connection diagnostics (connect/connected/disconnect/replaced/heartbeat-missed).
    *  Fires regardless of `quiet`. */
@@ -89,6 +97,10 @@ const MAX_RECONNECT_MS = 30_000;
 const HEARTBEAT_MS = 15_000;
 const BACKPRESSURE_BYTES = 16 * 1024 * 1024;
 const CHUNK_SIZE = 32_768;
+const DEFAULT_RECLAIM_MAX_MS = 10 * 60_000;
+// a registration that held this long counts as stable: the next takeover is a
+// fresh event, so the reclaim backoff starts over instead of growing forever
+const RECLAIM_STABLE_MS = 60_000;
 
 function fmtDuration(ms: number): string {
   if (ms < 1_000) return `${ms} ms`;
@@ -114,6 +126,8 @@ export class RelayAgent {
   #reconnectTimer: NodeJS.Timeout | null = null;
   #reconnectDelay = BASE_RECONNECT_MS;
   #heartbeatTimer: NodeJS.Timeout | null = null;
+  #reclaimTimer: NodeJS.Timeout | null = null;
+  #reclaimDelay = 0;
   #httpAborts = new Map<string, AbortController>();
   #localSockets = new Map<string, WebSocket>();
   #responders = new Map<string, E2EResponder>();
@@ -189,6 +203,7 @@ export class RelayAgent {
 
   reconnect() {
     if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer), (this.#reconnectTimer = null);
+    if (this.#reclaimTimer) clearTimeout(this.#reclaimTimer), (this.#reclaimTimer = null);
     this.#reconnectDelay = BASE_RECONNECT_MS;
     this.#attempt = 0; // user-initiated: a fresh attempt series
     this.#stopped = false;
@@ -209,6 +224,7 @@ export class RelayAgent {
     this.#stopped = true;
     this.#stopHeartbeat();
     if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer), (this.#reconnectTimer = null);
+    if (this.#reclaimTimer) clearTimeout(this.#reclaimTimer), (this.#reclaimTimer = null);
     this.#teardownTunnels();
     if (this.#ws) {
       try {
@@ -314,10 +330,23 @@ export class RelayAgent {
     this.#diag({ type: "replaced", hint, lastedMs });
     if (this.#stopped) {
       this.#setState("stopped");
-    } else {
-      this.#lastError = "Another agent took over this pairing";
-      this.#setState("replaced");
+      return;
     }
+    // Appliance mode: the preemptor is usually a zombie (a laptop that ran
+    // with the same code once, a crashed leftover socket). Re-register after
+    // a delay and take the pairing back; escalate if it is contested.
+    const reclaimMs = this.#config.reclaimMs ?? 0;
+    if (reclaimMs > 0) {
+      if (lastedMs === null || lastedMs >= RECLAIM_STABLE_MS) this.#reclaimDelay = reclaimMs;
+      else this.#reclaimDelay = this.#reclaimDelay > 0 ? Math.min(this.#reclaimDelay * 2, this.#config.reclaimMaxMs ?? DEFAULT_RECLAIM_MAX_MS) : reclaimMs;
+      if (!this.#config.quiet) console.warn(`[RelayAgent] reclaiming the pairing in ${Math.round(this.#reclaimDelay / 1000)} s (reclaimMs)`);
+      this.#reclaimTimer = setTimeout(() => {
+        this.#reclaimTimer = null;
+        this.reconnect();
+      }, this.#reclaimDelay);
+    }
+    this.#lastError = "Another agent took over this pairing";
+    this.#setState("replaced");
   }
 
   #onDisconnect(

@@ -89,6 +89,7 @@ server 回复：
 - `{"t":"error","message":"..."}` —— 拒绝（agent 进入 error 态）
 
 **抢占语义**：同一 `tokenHash` 已有 agent 时，第二个注册成功，**旧连接被以 close code `4000` 踢掉**。agent 收到 4000 进入 `replaced` 状态，不再自动重连（用户显式 reconnect 才恢复）。
+本 kit 的 `RelayAgent` 另提供**可选的自动回收**（`reclaimMs`，默认关闭，语义仍是上句）：被抢占后延迟重新注册抢回配对——适合无人值守的常驻部署；连续被顶（注册存活 < 60s）按 ×2 退避到上限，稳定注册（≥ 60s）后退避复位。两个都开自动回收的常驻 agent 会以递增间隔互换配对而不是震荡风暴。
 
 服务器**以连接 URL 的 `th` 查询参数定位房间**；`register` 帧内的 `tokenHash` /
 `name` / `key` 字段对通用服务器是保留字段，可忽略（本 kit 的两种服务器实现均忽略）。
@@ -139,6 +140,9 @@ WebSocket 隧道：
    └─ agent 不在线：phone 挂起等待；agent 注册时对挂起者补发 wopen；60s 仍无 agent → close 4404
       （挂起期间早帧缓冲上限 **256 帧 / 64 KiB**——正常握手 3 帧合计 <1 KB，上限只约束
        恶意客户端的存储滥用；超限帧静默丢弃）
+      client 的握手超时预算应 **大于 60s**，否则本地超时先到，4404 这个"桌面端不在线"
+      的明确信号永远送不到端上（`@hsinsekai-nanami/client` 的 `handshakeTimeoutMs`，
+      默认 70s；"socket 一直没打开"仍用较短的 `connectTimeoutMs`，两类失败因此可区分）
 3. server 向 agent 发 {"t":"wopen","id":<tunnelId>,"path":"/__alma_e2e__"}
 4. agent 创建 E2E responder（responder 角色）→ 回 {"t":"wopened","id":<tunnelId>}
 5. phone 的 E2ESession 握手消息（JSON 字符串）与密文（二进制）：
@@ -184,7 +188,7 @@ Alma 手机端互通可改回 `alma-relay-e2e/v1` 并实现其 `/c/<code>` 非 E
 |---|---|---|---|
 | `1000` | 任一侧 | 正常关闭（用户 stop / 请求结束） | 清理状态，无需重连 |
 | `1011` | server → phone | 注册的 agent 掉线，隧道被拆 | client `error`，可重连等 agent 回来 |
-| `4000` | server → agent | 新 agent 抢占同一配对，旧连接被踢 | agent 进 `replaced`，**不自动重连**，等用户显式 reconnect |
+| `4000` | server → agent | 新 agent 抢占同一配对，旧连接被踢 | agent 进 `replaced`，默认**不自动重连**等用户显式 reconnect（opt-in 自动回收见 §3） |
 | `4404` | server → phone | 挂起 60s 仍无 agent 注册 | client `error`，提示"桌面端未上线" |
 | `1006` | 传输层 | 异常断开（无 close 帧，射频掉线/网络切换） | client `error`，结合 watchdog/lastFrameAt 判断重连 |
 

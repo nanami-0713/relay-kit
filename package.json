@@ -1,7 +1,7 @@
 {
   "name": "relay-kit",
   "private": true,
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Out-of-the-box E2E relay server (relay-e2e/v1) for Cloudflare Workers — bring your CF account, deploy in one command. Ships with reference agent and client implementations.",
   "type": "module",
   "workspaces": [
@@ -12,6 +12,7 @@
     "test:pending": "node test/phone-before-agent.mjs",
     "test:close": "node test/close-pending.mjs",
     "test:watchdog": "node test/watchdog.mjs",
+    "test:offline": "node test/agent-offline.mjs",
     "test:dev": "node test/workers.mjs",
     "build": "npm run build -w packages/core && npm run build -ws",
     "typecheck": "tsc -p tsconfig.json && tsc -p workers/relay/tsconfig.json"
